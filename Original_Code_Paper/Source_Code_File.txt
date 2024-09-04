@@ -1,0 +1,3612 @@
+###Source Code for Pathways Analysis
+
+########################################################
+#######################################################
+#########CONSTRUCTING THE NECESSARY DEG FILES##########
+######################################################
+######################################################
+####Do this for as many DEG files as you need########
+
+
+##Split the Data into Two Groups of interest (Normal and Tumor)
+NormalCOAD <- COADgenomicMatrix[,grep(".11", colnames(COADgenomicMatrix))] 
+TumorCOAD <- COADgenomicMatrix[,grep(".01", colnames(COADgenomicMatrix))] 
+colnames(NormalCOAD)
+NormalCOAD <- NormalCOAD[,-32]
+NormalCOAD <- NormalCOAD[,-28]
+
+
+##Set up design matrix
+NormalDesign <- as.data.frame(colnames(NormalCOAD))
+NormalDesign$Pheno <- "Normal"
+NormalDesign$Color <- "Purple"
+colnames(NormalDesign) <- c("SampleID", "Pheno", "Color")
+TumorDesign <- as.data.frame(colnames(TumorCOAD))
+TumorDesign$Pheno <- "Tumor"
+TumorDesign$Color <- "Green"
+colnames(TumorDesign) <- c("SampleID", "Pheno", "Color")
+Design <- rbind(TumorDesign, NormalDesign)
+Samples <- as.matrix(Design$SampleID)
+Pheno <- as.matrix(Design$Pheno)
+Color <- as.matrix(Design$Color)
+COADdesign <- model.matrix(~ 0+factor(c(Pheno)))
+colnames(COADdesign) <- c("Normal", "Tumor")
+
+#Remove rows that have all 0s
+COADgenomicMatrix <- round(COADgenomicMatrix)
+COADRSEM.zero <- COADgenomicMatrix[!apply(COADgenomicMatrix, 1, function(row) all(row == 0)), ]
+COADRSEM.50zero <- COADRSEM.zero[which(as.numeric(rowSums(COADRSEM.zero != 0)) > ncol(COADRSEM.zero)/2),]
+COADRSEM.80zero <- COADRSEM.zero[which(as.numeric(rowSums(COADRSEM.zero != 0)) > (ncol(COADRSEM.zero))*0.2),]
+COADRSEM.80zero <- COADRSEM.zero[rowSums(COADRSEM.zero==0)/ncol(COADRSEM.zero) < 0.8, ]
+sapply(COADRSEM.50zero, class)
+
+##Load Required Packages
+source("http://bioconductor.org/biocLite.R")
+biocLite(pkgs = c("Rsubread","limma","edgeR"))
+library(Rsubread)
+library(limma)
+library(edgeR)
+options(digits=2)
+
+##Format RSEM Table to include only wanted patients
+COADRSEMNvT <- COADgenomicMatrix[,Samples]
+View(COADRSEMNvT)
+sapply(COADRSEMNvT, class) 
+class(COADRSEMNvT)
+COADRSEMNvT <- as.matrix(COADRSEMNvT)
+isexpr <- rowSums(cpm(COADRSEMNvT) > 10) >= 2
+COADRSEMNvT <- COADRSEMNvT[isexpr,]
+
+##Scale Normalization
+y <- DGEList(counts = COADRSEMNvT, lib.size = colSums(COADRSEMNvT))
+y <- calcNormFactors(y)
+
+##Voom Normalization of RSEM values
+COADvoomData <- voom(y,COADdesign,plot=TRUE)
+plotMDS(voomData,xlim=c(-2.5,2.5))
+
+##DEGListGeneration
+fit <- lmFit(COADvoomData, COADdesign)
+contrast.matrix <- makeContrasts(Tumor-Normal, levels=COADdesign)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+ColonTCGATvNDEG <- topTable(fit2, adjust="fdr", number=nrow(COADvoomData))
+ColonTCGATvNDEG$Score <- (-log(ColonTCGATvNDEG$adj.P.Val)*ColonTCGATvNDEG$logFC)
+ColonTCGATvNDEG$ABScore <- abs(ColonTCGATvNDEG$Score)
+write.csv(ColonTCGATvNDEG, "ColonTCGATvNDEG.csv")
+
+
+
+################################################################
+###############################################################
+#############PATHWAY SCORING ALGORITHM########################
+##############################################################
+##############################################################
+#########Complete for as many conditions as you have##########
+
+AllPathwaysKEGGPS <- read.delim("C:/Users/sp36462/Downloads/PanCancerMetabolism/AllPathwaysKEGGPS.txt")
+AllPathwaysKEGGPS <- data.frame(lapply(AllPathwaysKEGGPS, as.character), stringsAsFactors=FALSE)
+
+
+#############################ABSOLUTE VALUE SCORES###################################
+ABSPathwayScore <- list()
+ColonABSScoreSum <- function(x){
+  for(i in 1:ncol(AllPathwaysKEGGPS)) { 
+    y <- x[rownames(x) %in% as.character(AllPathwaysKEGGPS[,i]),]
+    ABSPathwayScore <- as.vector(sum(y[,8])/sqrt(length(Samples)))
+    print(ABSPathwayScore)
+    plot(ABSPathwayScore)
+  }
+  
+}
+
+ColonABSScoreSum(ColonTCGATvNDEG)
+
+######################POSITIVE/NEGATIVE SCORES################################
+PathwayScore <- list()
+ColonScoreSum <- function(x){
+  for(i in 1:ncol(AllPathwaysKEGGPS)) { 
+    y <- x[rownames(x) %in% as.character(AllPathwaysKEGGPS[,i]),]
+    PathwayScore <- as.vector(sum(y[,7])/sqrt(length(Samples)))
+    print(PathwayScore)
+    plot(PathwayScore)
+  }
+  
+}
+
+ColonScoreSum(ColonTCGATvNDEG)
+
+
+
+
+#########################################################
+#########################################################
+###########BOOTSTRAPPING CODE###########################
+#######################################################
+######################################################
+
+
+###Construct a single file where each column is a list of pathway/absolute pathway scores##
+
+###Colon
+set.seed(1234)
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval1 = sum(z >= RemainingABSScores[1,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval2 = sum(z >= RemainingABSScores[2,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval3 = sum(z >= RemainingABSScores[3,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(32),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval4 = sum(z >= RemainingABSScores[4,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval5 = sum(z >= RemainingABSScores[5,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(10),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval6 = sum(z >= RemainingABSScores[6,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(20),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval7 = sum(z >= RemainingABSScores[7,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval8 = sum(z >= RemainingABSScores[8,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval9 = sum(z >= RemainingABSScores[9,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval10 = sum(z >= RemainingABSScores[10,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval11 = sum(z >= RemainingABSScores[11,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(65),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval12 = sum(z >= RemainingABSScores[12,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval13 = sum(z >= RemainingABSScores[13,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(13),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval14 = sum(z >= RemainingABSScores[14,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval15 = sum(z >= RemainingABSScores[15,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval16 = sum(z >= RemainingABSScores[16,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(75),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval17 = sum(z >= RemainingABSScores[17,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(71),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval18 = sum(z >= RemainingABSScores[18,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(68),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval19 = sum(z >= RemainingABSScores[19,2])/100000
+
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval20 = sum(z >= RemainingABSScores[20,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval21 = sum(z >= RemainingABSScores[21,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(9),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval22 = sum(z >= RemainingABSScores[22,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(7),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval23 = sum(z >= RemainingABSScores[23,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval24 = sum(z >= RemainingABSScores[24,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval25 = sum(z >= RemainingABSScores[25,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval26 = sum(z >= RemainingABSScores[26,2])/100000
+
+
+##Methionine Cycle
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample 47 (Methionine Cycle) genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval27 = sum(z >= RemainingABSScores[27,2])/100000
+
+##(filename="Colon28.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval28 = sum(z >= RemainingABSScores[28,2])/100000
+
+##(filename="Colon29.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval29 = sum(z >= RemainingABSScores[29,2])/100000
+
+##(filename="Colon30.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(30),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval30 = sum(z >= RemainingABSScores[30,2])/100000
+
+##(filename="Colon31.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval31 = sum(z >= RemainingABSScores[31,2])/100000
+
+##(filename="Colon32.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(26),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval32 = sum(z >= RemainingABSScores[32,2])/100000
+
+##(filename="Colon33.##")
+##Polyamine Cycle
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample 13 (Folate Cycle) genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(9),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval33 = sum(z >= RemainingABSScores[33,2])/100000
+
+##(filename="ColonPolyamine.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(29),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval34 = sum(z >= RemainingABSScores[34,2])/100000
+
+##(filename="Colon35.##")
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(7),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval35 = sum(z >= RemainingABSScores[35,2])/100000
+
+##(filename="Colon36.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(13),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+
+pval36 = sum(z >= RemainingABSScores[36,2])/100000
+
+##(filename="Colon37.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval37 = sum(z >= RemainingABSScores[37,2])/100000
+
+##(filename="Colon38.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(1),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval38 = sum(z >= RemainingABSScores[38,2])/100000
+
+##(filename="Colon39.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval39 = sum(z >= RemainingABSScores[39,2])/100000
+
+##(filename="Colon40.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval40 = sum(z >= RemainingABSScores[40,2])/100000
+
+##(filename="Colon41.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(15),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval41 = sum(z >= RemainingABSScores[41,2])/100000
+
+##(filename="Colon42.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(89),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval42 = sum(z >= RemainingABSScores[42,2])/100000
+
+##(filename="Colon43.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(60),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval43 = sum(z >= RemainingABSScores[43,2])/100000
+
+##(filename="Colon44.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(8),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval44 = sum(z >= RemainingABSScores[44,2])/100000
+
+##(filename="Colon45.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval45 = sum(z >= RemainingABSScores[45,2])/100000
+
+##(filename="Colon46.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(15),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval46 = sum(z >= RemainingABSScores[46,2])/100000
+
+##(filename="Colon47.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval47 = sum(z >= RemainingABSScores[47,2])/100000
+
+##(filename="Colon48.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval48 = sum(z >= RemainingABSScores[48,2])/100000
+
+##(filename="Colon49.##")
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(2),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval49 = sum(z >= RemainingABSScores[49,2])/100000
+
+##(filename="Colon50.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(36),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval50 = sum(z >= RemainingABSScores[50,2])/100000
+
+##(filename="Colon51.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval51 = sum(z >= RemainingABSScores[51,2])/100000
+
+##(filename="Colon52.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval52 = sum(z >= RemainingABSScores[52,2])/100000
+
+##(filename="Colon53.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(27),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval53 = sum(z >= RemainingABSScores[53,2])/100000
+
+##(filename="Colon54.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(36),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval54 = sum(z >= RemainingABSScores[54,2])/100000
+
+##(filename="Colon55.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval55 = sum(z >= RemainingABSScores[55,2])/100000
+
+##(filename="Colon56.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(28),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval56 = sum(z >= RemainingABSScores[56,2])/100000
+
+##(filename="Colon57.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(32),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval57 = sum(z >= RemainingABSScores[57,2])/100000
+
+##(filename="Colon58.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(28),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval58 = sum(z >= RemainingABSScores[58,2])/100000
+
+##(filename="Colon59.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(71),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval59 = sum(z >= RemainingABSScores[59,2])/100000
+
+##(filename="Colon60.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(133),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval60 = sum(z >= RemainingABSScores[60,2])/100000
+
+##(filename="Colon61.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval61 = sum(z >= RemainingABSScores[61,2])/100000
+
+##(filename="Colon62.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(10),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval62 = sum(z >= RemainingABSScores[62,2])/100000
+
+##(filename="Colon63.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(20),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval63 = sum(z >= RemainingABSScores[63,2])/100000
+
+##(filename="Colon64.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval64 = sum(z >= RemainingABSScores[64,2])/100000
+
+##(filename="Colon65.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(58),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval65 = sum(z >= RemainingABSScores[65,2])/100000
+
+##(filename="Colon66.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(59),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval66 = sum(z >= RemainingABSScores[66,2])/100000
+
+##(filename="Colon67.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(95),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval67 = sum(z >= RemainingABSScores[67,2])/100000
+
+##(filename="Colon68.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(45),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval68 = sum(z >= RemainingABSScores[68,2])/100000
+
+##(filename="Colon69.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(47),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval69 = sum(z >= RemainingABSScores[69,2])/100000
+
+##(filename="Colon70.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(62),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval70 = sum(z >= RemainingABSScores[70,2])/100000
+
+##(filename="Colon71.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(29),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval71 = sum(z >= RemainingABSScores[71,2])/100000
+
+##(filename="Colon72.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(25),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval72 = sum(z >= RemainingABSScores[72,2])/100000
+
+##(filename="Colon73.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(23),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval73 = sum(z >= RemainingABSScores[73,2])/100000
+
+##(filename="Colon74.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(175),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval74 = sum(z >= RemainingABSScores[74,2])/100000
+
+##(filename="Colon75.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(105),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval75 = sum(z >= RemainingABSScores[75,2])/100000
+
+##(filename="Colon76.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(35),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval76 = sum(z >= RemainingABSScores[76,2])/100000
+
+##(filename="Colon77.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(40),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval77 = sum(z >= RemainingABSScores[77,2])/100000
+
+##(filename="Colon78.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(45),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval78 = sum(z >= RemainingABSScores[78,2])/100000
+
+##(filename="Colon79.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval79 = sum(z >= RemainingABSScores[79,2])/100000
+
+##(filename="Colon80.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval80 = sum(z >= RemainingABSScores[80,2])/100000
+
+##(filename="Colon81.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(59),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval81 = sum(z >= RemainingABSScores[81,2])/100000
+
+##(filename="Colon82.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(21),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval82 = sum(z >= RemainingABSScores[82,2])/100000
+
+##(filename="Colon83.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval83 = sum(z >= RemainingABSScores[83,2])/100000
+
+##(filename="Colon84.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval84 = sum(z >= RemainingABSScores[84,2])/100000
+
+##(filename="Colon85.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(35),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval85 = sum(z >= RemainingABSScores[85,2])/100000
+
+##(filename="Colon86.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval86 = sum(z >= RemainingABSScores[86,2])/100000
+
+##(filename="Colon87.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(40),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval87 = sum(z >= RemainingABSScores[87,2])/100000
+
+##(filename="Colon88.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval88 = sum(z >= RemainingABSScores[88,2])/100000
+
+##(filename="Colon89.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval89 = sum(z >= RemainingABSScores[89,2])/100000
+
+##(filename="Colon90.##")
+
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval90 = sum(z >= RemainingABSScores[90,2])/100000
+
+##(filename="Colon92.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval91 = sum(z >= RemainingABSScores[91,2])/100000
+
+##(filename="Colon93.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval92 = sum(z >= RemainingABSScores[92,2])/100000
+
+##(filename="Colon94.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(54),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval93 = sum(z >= RemainingABSScores[93,2])/100000
+
+##(filename="Colon95.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval94 = sum(z >= RemainingABSScores[94,2])/100000
+
+##(filename="Colon96.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval95 = sum(z >= RemainingABSScores[95,2])/100000
+
+##(filename="Colon97.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval96 = sum(z >= RemainingABSScores[96,2])/100000
+
+##(filename="Colon98.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(54),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval97 = sum(z >= RemainingABSScores[97,2])/100000
+
+##(filename="Colon99.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(19),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval98 = sum(z >= RemainingABSScores[98,2])/100000
+
+##(filename="Colon100.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(25),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval99 = sum(z >= RemainingABSScores[99,2])/100000
+
+##(filename="Colon011.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(46),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval100 = sum(z >= RemainingABSScores[100,2])/100000
+
+##(filename="Colonhsa.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval101 = sum(z >= RemainingABSScores[101,2])/100000
+
+##(filename="Colon103.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval102 = sum(z >= RemainingABSScores[102,2])/100000
+
+##(filename="Colon104.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval103 = sum(z >= RemainingABSScores[103,2])/100000
+
+##(filename="Colon105.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval104 = sum(z >= RemainingABSScores[104,2])/100000
+
+##(filename="Colon106.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval105 = sum(z >= RemainingABSScores[105,2])/100000
+
+##(filename="Colon107.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval106 = sum(z >= RemainingABSScores[106,2])/100000
+
+##(filename="Colon108.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval107 = sum(z >= RemainingABSScores[107,2])/100000
+
+##(filename="Colon109.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(42),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval108 = sum(z >= RemainingABSScores[108,2])/100000
+
+##(filename="Colon110.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval109 = sum(z >= RemainingABSScores[109,2])/100000
+
+##(filename="Colon111.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(22),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval110 = sum(z >= RemainingABSScores[110,2])/100000
+
+##(filename="Colon112.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval111 = sum(z >= RemainingABSScores[111,2])/100000
+
+##(filename="Colon113.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval112 = sum(z >= RemainingABSScores[112,2])/100000
+
+##(filename="Colon114.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(73),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval113 = sum(z >= RemainingABSScores[113,2])/100000
+
+##(filename="Colon115.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(69),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval114 = sum(z >= RemainingABSScores[114,2])/100000
+
+##(filename="Colon116.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.ABSScores <- sample(ColonTCGATvNDEG$ABSScore,
+                           size=length(46),
+                           replace = T
+  )
+  # Sum ABSScores
+  z[i] <- sum(boot.ABSScores)/sqrt(103)
+}
+
+pval115 = sum(z >= RemainingABSScores[115,2])/100000
+
+
+
+
+Pvals <- as.data.frame(cbind(pval1, pval2, pval3, pval4, pval5, pval6, pval7, pval8, pval9, pval10, pval11, pval12, pval13, pval14, pval15, pval16, pval17, pval18, pval19, pval20, pval21, pval22, pval23, pval24, pval25, pval26, pval27, pval28, pval29, pval30, pval31, pval32, pval33, pval34, pval35, pval36, pval37, pval38, pval39, pval40, pval41, pval42, pval43, pval44, pval45, pval46, pval47, pval48, pval49, pval50, pval51, pval52, pval53, pval54, pval55, pval56, pval57, pval58, pval59, pval60, pval61, pval62, pval63, pval64, pval65, pval66, pval67, pval68, pval69, pval70, pval71, pval72, pval73, pval74, pval75, pval76, pval77, pval78, pval79, pval80, pval81, pval82, pval83, pval84, pval85, pval86, pval87, pval88, pval89, pval90, pval91, pval92, pval93, pval94, pval95, pval96, pval97, pval98, pval99, pval100, pval101, pval102, pval103, pval104, pval105, pval106, pval107, pval108, pval109, pval110, pval111, pval112, pval113, pval114, pval115))
+###CAN ADD MORE COLUMNS TO PVALS PRIOR TO EXPORT
+##remove Glycolysis/Gluconeogenesis
+write.csv(Pvals, "ColonABSPVal.csv")
+
+
+
+
+
+
+###Construct a single file where each column is a list of  pathway scores##
+
+###Colon
+set.seed(1234)
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval1 = sum(z >= RemainingScores[1,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval2 = sum(z >= RemainingScores[2,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval3 = sum(z >= RemainingScores[3,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(32),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval4 = sum(z >= RemainingScores[4,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval5 = sum(z >= RemainingScores[5,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(10),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval6 = sum(z >= RemainingScores[6,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(20),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval7 = sum(z >= RemainingScores[7,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval8 = sum(z >= RemainingScores[8,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval9 = sum(z >= RemainingScores[9,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval10 = sum(z >= RemainingScores[10,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval11 = sum(z >= RemainingScores[11,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(65),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval12 = sum(z >= RemainingScores[12,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval13 = sum(z >= RemainingScores[13,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(13),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval14 = sum(z >= RemainingScores[14,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval15 = sum(z >= RemainingScores[15,2])/100000
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval16 = sum(z >= RemainingScores[16,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(75),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval17 = sum(z >= RemainingScores[17,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(71),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval18 = sum(z >= RemainingScores[18,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(68),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval19 = sum(z >= RemainingScores[19,2])/100000
+
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval20 = sum(z >= RemainingScores[20,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval21 = sum(z >= RemainingScores[21,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(9),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval22 = sum(z >= RemainingScores[22,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(7),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval23 = sum(z >= RemainingScores[23,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval24 = sum(z >= RemainingScores[24,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval25 = sum(z >= RemainingScores[25,2])/100000
+
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval26 = sum(z >= RemainingScores[26,2])/100000
+
+
+##Methionine Cycle
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample 47 (Methionine Cycle) genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval27 = sum(z >= RemainingScores[27,2])/100000
+
+##(filename="Colon28.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(12),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval28 = sum(z >= RemainingScores[28,2])/100000
+
+##(filename="Colon29.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval29 = sum(z >= RemainingScores[29,2])/100000
+
+##(filename="Colon30.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(30),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval30 = sum(z >= RemainingScores[30,2])/100000
+
+##(filename="Colon31.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval31 = sum(z >= RemainingScores[31,2])/100000
+
+##(filename="Colon32.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(26),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval32 = sum(z >= RemainingScores[32,2])/100000
+
+##(filename="Colon33.##")
+##Polyamine Cycle
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample 13 (Folate Cycle) genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(9),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval33 = sum(z >= RemainingScores[33,2])/100000
+
+##(filename="ColonPolyamine.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(29),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval34 = sum(z >= RemainingScores[34,2])/100000
+
+##(filename="Colon35.##")
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(7),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval35 = sum(z >= RemainingScores[35,2])/100000
+
+##(filename="Colon36.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(13),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+
+pval36 = sum(z >= RemainingScores[36,2])/100000
+
+##(filename="Colon37.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval37 = sum(z >= RemainingScores[37,2])/100000
+
+##(filename="Colon38.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(1),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval38 = sum(z >= RemainingScores[38,2])/100000
+
+##(filename="Colon39.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval39 = sum(z >= RemainingScores[39,2])/100000
+
+##(filename="Colon40.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval40 = sum(z >= RemainingScores[40,2])/100000
+
+##(filename="Colon41.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(15),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval41 = sum(z >= RemainingScores[41,2])/100000
+
+##(filename="Colon42.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(89),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval42 = sum(z >= RemainingScores[42,2])/100000
+
+##(filename="Colon43.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(60),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval43 = sum(z >= RemainingScores[43,2])/100000
+
+##(filename="Colon44.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(8),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval44 = sum(z >= RemainingScores[44,2])/100000
+
+##(filename="Colon45.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval45 = sum(z >= RemainingScores[45,2])/100000
+
+##(filename="Colon46.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(15),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval46 = sum(z >= RemainingScores[46,2])/100000
+
+##(filename="Colon47.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval47 = sum(z >= RemainingScores[47,2])/100000
+
+##(filename="Colon48.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(14),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval48 = sum(z >= RemainingScores[48,2])/100000
+
+##(filename="Colon49.##")
+
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(2),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval49 = sum(z >= RemainingScores[49,2])/100000
+
+##(filename="Colon50.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(36),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval50 = sum(z >= RemainingScores[50,2])/100000
+
+##(filename="Colon51.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(33),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval51 = sum(z >= RemainingScores[51,2])/100000
+
+##(filename="Colon52.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval52 = sum(z >= RemainingScores[52,2])/100000
+
+##(filename="Colon53.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(27),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval53 = sum(z >= RemainingScores[53,2])/100000
+
+##(filename="Colon54.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(36),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval54 = sum(z >= RemainingScores[54,2])/100000
+
+##(filename="Colon55.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval55 = sum(z >= RemainingScores[55,2])/100000
+
+##(filename="Colon56.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(28),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval56 = sum(z >= RemainingScores[56,2])/100000
+
+##(filename="Colon57.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(32),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval57 = sum(z >= RemainingScores[57,2])/100000
+
+##(filename="Colon58.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(28),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval58 = sum(z >= RemainingScores[58,2])/100000
+
+##(filename="Colon59.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(71),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval59 = sum(z >= RemainingScores[59,2])/100000
+
+##(filename="Colon60.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(133),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval60 = sum(z >= RemainingScores[60,2])/100000
+
+##(filename="Colon61.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval61 = sum(z >= RemainingScores[61,2])/100000
+
+##(filename="Colon62.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(10),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval62 = sum(z >= RemainingScores[62,2])/100000
+
+##(filename="Colon63.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(20),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval63 = sum(z >= RemainingScores[63,2])/100000
+
+##(filename="Colon64.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval64 = sum(z >= RemainingScores[64,2])/100000
+
+##(filename="Colon65.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(58),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval65 = sum(z >= RemainingScores[65,2])/100000
+
+##(filename="Colon66.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(59),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval66 = sum(z >= RemainingScores[66,2])/100000
+
+##(filename="Colon67.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(95),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval67 = sum(z >= RemainingScores[67,2])/100000
+
+##(filename="Colon68.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(45),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval68 = sum(z >= RemainingScores[68,2])/100000
+
+##(filename="Colon69.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(47),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval69 = sum(z >= RemainingScores[69,2])/100000
+
+##(filename="Colon70.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(62),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval70 = sum(z >= RemainingScores[70,2])/100000
+
+##(filename="Colon71.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(29),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval71 = sum(z >= RemainingScores[71,2])/100000
+
+##(filename="Colon72.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(25),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval72 = sum(z >= RemainingScores[72,2])/100000
+
+##(filename="Colon73.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(23),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval73 = sum(z >= RemainingScores[73,2])/100000
+
+##(filename="Colon74.##")
+## Resample DE genes 100000 times 
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(175),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval74 = sum(z >= RemainingScores[74,2])/100000
+
+##(filename="Colon75.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(105),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval75 = sum(z >= RemainingScores[75,2])/100000
+
+##(filename="Colon76.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(35),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval76 = sum(z >= RemainingScores[76,2])/100000
+
+##(filename="Colon77.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(40),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval77 = sum(z >= RemainingScores[77,2])/100000
+
+##(filename="Colon78.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(45),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval78 = sum(z >= RemainingScores[78,2])/100000
+
+##(filename="Colon79.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(48),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval79 = sum(z >= RemainingScores[79,2])/100000
+
+##(filename="Colon80.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval80 = sum(z >= RemainingScores[80,2])/100000
+
+##(filename="Colon81.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(59),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval81 = sum(z >= RemainingScores[81,2])/100000
+
+##(filename="Colon82.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(21),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval82 = sum(z >= RemainingScores[82,2])/100000
+
+##(filename="Colon83.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval83 = sum(z >= RemainingScores[83,2])/100000
+
+##(filename="Colon84.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(24),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval84 = sum(z >= RemainingScores[84,2])/100000
+
+##(filename="Colon85.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(35),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval85 = sum(z >= RemainingScores[85,2])/100000
+
+##(filename="Colon86.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval86 = sum(z >= RemainingScores[86,2])/100000
+
+##(filename="Colon87.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(40),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval87 = sum(z >= RemainingScores[87,2])/100000
+
+##(filename="Colon88.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval88 = sum(z >= RemainingScores[88,2])/100000
+
+##(filename="Colon89.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval89 = sum(z >= RemainingScores[89,2])/100000
+
+##(filename="Colon90.##")
+
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval90 = sum(z >= RemainingScores[90,2])/100000
+
+##(filename="Colon92.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(17),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval91 = sum(z >= RemainingScores[91,2])/100000
+
+##(filename="Colon93.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval92 = sum(z >= RemainingScores[92,2])/100000
+
+##(filename="Colon94.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(54),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval93 = sum(z >= RemainingScores[93,2])/100000
+
+##(filename="Colon95.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(49),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval94 = sum(z >= RemainingScores[94,2])/100000
+
+##(filename="Colon96.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval95 = sum(z >= RemainingScores[95,2])/100000
+
+##(filename="Colon97.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(31),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval96 = sum(z >= RemainingScores[96,2])/100000
+
+##(filename="Colon98.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(54),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval97 = sum(z >= RemainingScores[97,2])/100000
+
+##(filename="Colon99.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(19),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval98 = sum(z >= RemainingScores[98,2])/100000
+
+##(filename="Colon100.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(25),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval99 = sum(z >= RemainingScores[99,2])/100000
+
+##(filename="Colon011.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(46),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval100 = sum(z >= RemainingScores[100,2])/100000
+
+##(filename="Colonhsa.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval101 = sum(z >= RemainingScores[101,2])/100000
+
+##(filename="Colon103.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval102 = sum(z >= RemainingScores[102,2])/100000
+
+##(filename="Colon104.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(4),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval103 = sum(z >= RemainingScores[103,2])/100000
+
+##(filename="Colon105.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(6),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval104 = sum(z >= RemainingScores[104,2])/100000
+
+##(filename="Colon106.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(18),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval105 = sum(z >= RemainingScores[105,2])/100000
+
+##(filename="Colon107.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval106 = sum(z >= RemainingScores[106,2])/100000
+
+##(filename="Colon108.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(3),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval107 = sum(z >= RemainingScores[107,2])/100000
+
+##(filename="Colon109.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(42),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval108 = sum(z >= RemainingScores[108,2])/100000
+
+##(filename="Colon110.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(11),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval109 = sum(z >= RemainingScores[109,2])/100000
+
+##(filename="Colon111.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(22),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval110 = sum(z >= RemainingScores[110,2])/100000
+
+##(filename="Colon112.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval111 = sum(z >= RemainingScores[111,2])/100000
+
+##(filename="Colon113.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(5),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval112 = sum(z >= RemainingScores[112,2])/100000
+
+##(filename="Colon114.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(73),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval113 = sum(z >= RemainingScores[113,2])/100000
+
+##(filename="Colon115.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(69),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval114 = sum(z >= RemainingScores[114,2])/100000
+
+##(filename="Colon116.##")
+
+z <- vector()
+for (i in 1:100000){
+  # Sample genes from the pool of DEG
+  boot.Scores <- sample(ColonTCGATvNDEG$Score,
+                           size=length(46),
+                           replace = T
+  )
+  # Sum Scores
+  z[i] <- sum(boot.Scores)/sqrt(103)
+}
+
+pval115 = sum(z >= RemainingScores[115,2])/100000
+
+
+
+
+Pvals <- as.data.frame(cbind(pval1, pval2, pval3, pval4, pval5, pval6, pval7, pval8, pval9, pval10, pval11, pval12, pval13, pval14, pval15, pval16, pval17, pval18, pval19, pval20, pval21, pval22, pval23, pval24, pval25, pval26, pval27, pval28, pval29, pval30, pval31, pval32, pval33, pval34, pval35, pval36, pval37, pval38, pval39, pval40, pval41, pval42, pval43, pval44, pval45, pval46, pval47, pval48, pval49, pval50, pval51, pval52, pval53, pval54, pval55, pval56, pval57, pval58, pval59, pval60, pval61, pval62, pval63, pval64, pval65, pval66, pval67, pval68, pval69, pval70, pval71, pval72, pval73, pval74, pval75, pval76, pval77, pval78, pval79, pval80, pval81, pval82, pval83, pval84, pval85, pval86, pval87, pval88, pval89, pval90, pval91, pval92, pval93, pval94, pval95, pval96, pval97, pval98, pval99, pval100, pval101, pval102, pval103, pval104, pval105, pval106, pval107, pval108, pval109, pval110, pval111, pval112, pval113, pval114, pval115))
+###CAN ADD MORE COLUMNS TO PVALS PRIOR TO EXPORT
+###Remove Glycolysis/Gluconeogenesis
+write.csv(Pvals, "ColonPVal.csv")
