@@ -83,6 +83,10 @@ This project focuses on pathway scoring for Lung Squamous Cell Carcinoma (LUSC) 
    - Valine, Leucine and Isoleucine Degradation
    - Histidine Metabolism
 
+![Top 10 LUSC Metabolic Pathways](https://github.com/LuisNagano/Metabolism-PathwayScore/blob/main/Figures/Top10_LUSC_Metabolic_Pathways.png)
+
+![Top 10 LUSC Pathways (P-values)](https://github.com/LuisNagano/Metabolism-PathwayScore/blob/main/Figures/Top10_LUSC_Metabolic_Pathways_Pvalues.png)
+
 2. Observed significant upregulation of the Pentose and Glucuronate Interconversions (PGI) pathway in LUSC, which is consistent with previous metabolomic studies showing increased UDP-D-glucuronate levels in lung cancer tissues.
 
 3. Identified potential metabolic vulnerabilities that could be exploited for therapeutic interventions.
