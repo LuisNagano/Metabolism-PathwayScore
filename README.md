@@ -3,6 +3,11 @@
 ## Overview
 This project focuses on pathway scoring for Lung Squamous Cell Carcinoma (LUSC) using transcriptomic data. The analysis is based on the methodology from the paper ["Pan-cancer analysis of transcriptional metabolic dysregulation using The Cancer Genome Atlas"](https://doi.org/10.1038/s41467-018-07232-8) by Rosario et al., 2018, which was adapted and expanded for this analysis. The aim of this project is to identify key metabolic pathways that are dysregulated in LUSC samples compared to normal tissue, leveraging data downloaded from the [GDAC Firehose](https://gdac.broadinstitute.org).
 
+Reference:
+
+![PathwayScore_paper](https://github.com/LuisNagano/Metabolism-PathwayScore/blob/main/PathwayScore_paper.png)
+
+
 ## Objectives
 
 1. Identify and quantify metabolic pathway dysregulation in LUSC compared to normal tissue.
