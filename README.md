@@ -5,7 +5,7 @@ This project focuses on pathway scoring for Lung Squamous Cell Carcinoma (LUSC) 
 
 Reference:
 
-![PathwayScore_paper](https://github.com/LuisNagano/Metabolism-PathwayScore/blob/main/PathwayScore_paper.png)
+![PathwayScore_paper](https://github.com/LuisNagano/Metabolism-PathwayScore/blob/main/PathwayScore_paper(1).png)
 
 
 ## Objectives
